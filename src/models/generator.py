@@ -1,4 +1,4 @@
-from models.conformer import ConformerBlock
+from CMGAN.src.models.conformer import ConformerBlock
 import torch
 import torch.nn as nn
 
@@ -136,7 +136,7 @@ class MaskDecoder(nn.Module):
         x = self.conv_1(x)
         x = self.prelu(self.norm(x))
         x = self.final_conv(x).permute(0, 3, 2, 1).squeeze(-1)
-        return self.prelu_out(x).permute(0, 2, 1).unsqueeze(1)
+        return self.prelu_out(x).permute(0, 3, 2, 1).unsqueeze(1)
 
 
 class ComplexDecoder(nn.Module):
@@ -167,7 +167,7 @@ class TSCNet(nn.Module):
         self.TSCB_4 = TSCB(num_channel=num_channel)
 
         self.mask_decoder = MaskDecoder(
-            num_features, num_channel=num_channel, out_channel=1
+            num_features, num_channel=num_channel, out_channel=2
         )
         self.complex_decoder = ComplexDecoder(num_channel=num_channel)
 
@@ -188,9 +188,19 @@ class TSCNet(nn.Module):
         out_mag = mask * mag
 
         complex_out = self.complex_decoder(out_5)
-        mag_real = out_mag * torch.cos(noisy_phase)
-        mag_imag = out_mag * torch.sin(noisy_phase)
+        # print(out_mag.size(), complex_out.size())
+        # torch.Size([1, 1, 1121, 201]) torch.Size([1, 2, 1121, 201])
+        # torch.Size([1, 1, 2, 1121, 201]) torch.Size([1, 2, 1121, 201])
+        mag_real = out_mag[:, :, 0, :, :] * torch.cos(noisy_phase)
+        mag_imag = out_mag[:, :, 0, :, :] * torch.sin(noisy_phase)
+        mag_real2 = out_mag[:, :, 1, :, :] * torch.cos(noisy_phase)
+        mag_imag2 = out_mag[:, :, 1, :, :] * torch.sin(noisy_phase)
+
         final_real = mag_real + complex_out[:, 0, :, :].unsqueeze(1)
         final_imag = mag_imag + complex_out[:, 1, :, :].unsqueeze(1)
+        final_real2 = mag_real2 + complex_out[:, 0, :, :].unsqueeze(1)
+        final_imag2 = mag_imag2 + complex_out[:, 1, :, :].unsqueeze(1)
 
-        return final_real, final_imag
+        # print(final_real.size(), final_imag.size(), final_real2.size(), final_imag2.size())
+        # torch.Size([1, 1, 1121, 201]) torch.Size([1, 1, 1121, 201])
+        return final_real, final_imag, final_real2, final_imag2

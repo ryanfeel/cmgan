@@ -1,0 +1,9 @@
+cmgan/**
+src/saved_model/**
+AudioSamples/**
+src/__pycache__/**
+src/data/__pycache__/**
+src/models/__pycache__/**
+src/runs/**
+src/tools/__pycache__/**
+**/__ptcache__/**
