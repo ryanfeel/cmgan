@@ -42,7 +42,7 @@ def ddp_setup(rank, world_size):
         world_size: Total number of processes
     """
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12357"
+    os.environ["MASTER_PORT"] = "12355"
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
@@ -52,6 +52,7 @@ class Trainer:
         self.hop = 400
         self.train_ds = train_ds
         self.test_ds = test_ds
+        self.epoch = 0
         self.model = TSCNet(num_channel=64, num_features=self.n_fft // 2 + 1).to(gpu_id)
         # self.discriminator = discriminator.Discriminator(ndf=16).to(gpu_id)
         print(gpu_id)
@@ -172,7 +173,25 @@ class Trainer:
             "clean_audio2": clean_audio2
         }
 
-    def calculate_sisnr_loss(self, generator_outputs):
+    def calculate_sisnr_loss_without_perm(self, generator_outputs, near_weight=0.5):
+        clean_audio = generator_outputs["clean"]
+        clean_audio2 = generator_outputs["clean2"]
+        est_audio = generator_outputs["est_audio"]
+        est_audio2 = generator_outputs["est_audio2"]
+
+        clean_audio = clean_audio.unsqueeze(-1).permute(1, 0, 2)
+        clean_audio2 = clean_audio2.unsqueeze(-1).permute(1, 0, 2)
+        est_audio = est_audio.unsqueeze(-1).permute(1, 0, 2)
+        est_audio2 = est_audio2.unsqueeze(-1).permute(1, 0, 2)
+        
+        loss1 = cal_si_snr(clean_audio, est_audio)
+        loss2 = cal_si_snr(clean_audio2, est_audio2)
+        
+        loss = loss1 * near_weight + loss2 * (1 - near_weight)
+
+        return loss
+
+    def calculate_sisnr_loss_with_perm(self, generator_outputs):
         clean_audio = generator_outputs["clean"]
         clean_audio2 = generator_outputs["clean2"]
         est_audio = generator_outputs["est_audio"]
@@ -180,20 +199,22 @@ class Trainer:
         source = torch.stack([clean_audio, clean_audio2], -1)
         est = torch.stack([est_audio, est_audio2], -1)
         loss = get_si_snr_with_pitwrapper(source, est)
-        # est.to(source)
-        # print(source, est)
-        # clean_audio = clean_audio.unsqueeze(-1).permute(1, 0, 2)
-        # clean_audio2 = clean_audio2.unsqueeze(-1).permute(1, 0, 2)
-        # est_audio = est_audio.unsqueeze(-1).permute(1, 0, 2)
-        # est_audio2 = est_audio2.unsqueeze(-1).permute(1, 0, 2)
-        
-        # loss1 = cal_si_snr(clean_audio, est_audio)
-        # loss2 = cal_si_snr(clean_audio2, est_audio2)
-        
-        # loss = (loss1 + loss2) / 2
-        # print(loss)
+
         return loss
-        
+
+    def calculate_sisnr_loss(self, generator_outputs):
+        if self.epoch < 10:
+            loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
+        elif self.epoch < 20:
+            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.5)
+        elif self.epoch < 30:
+            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.8)
+        else:
+            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 1.0)
+
+        return loss
+            
+
     def calculate_generator_loss(self, generator_outputs):
 
         # predict_fake_metric = self.discriminator(
@@ -203,15 +224,6 @@ class Trainer:
         #     predict_fake_metric.flatten(), generator_outputs["one_labels"].float()
         # )
 
-        # d_loss
-        '''
-        d_loss_mag = F.mse_loss(
-            generator_outputs["clean_mag"], generator_outputs["est_mag"]
-        )
-        d_loss_ri = F.mse_loss(
-            generator_outputs["clean_real"], generator_outputs["est_real"]
-        ) + F.mse_loss(generator_outputs["clean_imag"], generator_outputs["est_imag"])
-        '''
         loss_mag = F.mse_loss(
             generator_outputs["est_mag"], generator_outputs["clean_mag"]
         )
@@ -247,14 +259,6 @@ class Trainer:
             # + args.loss_weights[3] * gen_loss_GAN
         )
         loss = loss * 0.8 + loss2 * 0.2
-        '''
-        d_loss = (
-            args.loss_weights[0] * d_loss_ri
-            + args.loss_weights[1] * d_loss_mag
-            # + args.loss_weights[2] * time_loss
-            # + args.loss_weights[3] * gen_loss_GAN
-        )
-        '''
 
         return loss
 
@@ -370,6 +374,7 @@ class Trainer:
         #     self.optimizer_disc, step_size=args.decay_epoch, gamma=0.5
         # )
         for epoch in range(args.epochs):
+            self.epoch = epoch
             self.model.train()
             # self.discriminator.train()
             step_num = len(self.train_ds)
