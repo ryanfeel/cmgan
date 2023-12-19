@@ -202,15 +202,21 @@ class Trainer:
 
         return loss
 
-    def calculate_sisnr_loss(self, generator_outputs):
+    def calculate_scheduling_loss(self, generator_outputs):
         if self.epoch < 10:
             loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
         elif self.epoch < 20:
+            mag_loss = self.calculate_mag_loss(generator_outputs)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.5)
+            loss = loss + mag_loss
         elif self.epoch < 30:
+            mag_loss = self.calculate_mag_loss(generator_outputs, 0.8)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.8)
+            loss = loss + mag_loss * 5.0
         else:
+            mag_loss = self.calculate_mag_loss(generator_outputs, 1.0)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 1.0)
+            loss = loss + mag_loss * 10.0
 
         return loss
             
@@ -262,6 +268,19 @@ class Trainer:
 
         return loss
 
+    def calculate_mag_loss(self, generator_outputs, near_weight=0.5):
+        loss1 = F.mse_loss(
+            generator_outputs["est_mag"], generator_outputs["clean_mag"]
+        )
+
+        loss2 = F.mse_loss(
+            generator_outputs["est_mag2"], generator_outputs["clean_mag2"]
+        )
+
+        loss = loss1 * near_weight + loss2 * (1 - near_weight)
+
+        return loss
+
     def calculate_discriminator_loss(self, generator_outputs):
 
         length = generator_outputs["est_audio"].size(-1)
@@ -303,7 +322,7 @@ class Trainer:
         generator_outputs["clean2"] = clean2
 
         # loss = self.calculate_generator_loss(generator_outputs)
-        loss = self.calculate_sisnr_loss(generator_outputs)
+        loss = self.calculate_scheduling_loss(generator_outputs)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -338,7 +357,7 @@ class Trainer:
         generator_outputs["clean2"] = clean2
 
         # loss = self.calculate_generator_loss(generator_outputs)
-        loss = self.calculate_sisnr_loss(generator_outputs)
+        loss = self.calculate_scheduling_loss(generator_outputs)
 
         # discrim_loss_metric = self.calculate_discriminator_loss(generator_outputs)
         # if discrim_loss_metric is None:
@@ -374,7 +393,7 @@ class Trainer:
         #     self.optimizer_disc, step_size=args.decay_epoch, gamma=0.5
         # )
         for epoch in range(args.epochs):
-            self.epoch = epoch
+            self.epoch = int(epoch)
             self.model.train()
             # self.discriminator.train()
             step_num = len(self.train_ds)
@@ -430,5 +449,5 @@ def main(rank: int, world_size: int, args):
 if __name__ == "__main__":
 
     world_size = torch.cuda.device_count()
-    world_size = 2
+    world_size = 4
     mp.spawn(main, args=(world_size, args), nprocs=world_size)
