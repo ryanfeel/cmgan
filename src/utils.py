@@ -17,7 +17,7 @@ def kaiming_init(m):
             m.bias.data.fill_(0.01)
 
 
-def power_compress_with_low_f_delete(x):
+def power_compress_with_low_f_delete(x, delete_f_bin=10):
     real = x[..., 0]
     imag = x[..., 1]
     spec = torch.complex(real, imag)
@@ -27,29 +27,26 @@ def power_compress_with_low_f_delete(x):
     temp_mag = mag.clone()
     temp_phase = phase.clone()
 
-    mag[:, :10, :] = 0
+    mag[:, :delete_f_bin, :] = 0
     mag = mag**0.3
     real_compress = mag * torch.cos(phase)
     imag_compress = mag * torch.sin(phase)
     return torch.stack([real_compress, imag_compress], 1), temp_mag, temp_phase
 
-def power_uncompress_with_low_f_delete(real, imag, temp_mag, temp_phase):
+def power_uncompress_with_low_f_delete(real, imag, temp_mag, temp_phase, delete_f_bin=10):
     spec = torch.complex(real, imag)
     mag = torch.abs(spec)
     phase = torch.angle(spec)
     
     mag = mag ** (1.0 / 0.3)
-    mag[:, :, :10, :] = temp_mag.unsqueeze(0)[:, :, :10, :] / 64.0
-    phase[:, :, :10, :] = temp_phase.unsqueeze(0)[:, :, :10, :]
+    mag[:, :, :delete_f_bin, :] = temp_mag.unsqueeze(0)[:, :, :delete_f_bin, :] / 64.0
+    phase[:, :, :delete_f_bin, :] = temp_phase.unsqueeze(0)[:, :, :delete_f_bin, :]
     
     real_compress = mag * torch.cos(phase)
     imag_compress = mag * torch.sin(phase)
     return torch.stack([real_compress, imag_compress], -1)
 
-def power_compress(x):
-    real = x[..., 0]
-    imag = x[..., 1]
-    spec = torch.complex(real, imag)
+def power_compress(spec):
     mag = torch.abs(spec)
     phase = torch.angle(spec)
     mag = mag**0.3
@@ -64,7 +61,8 @@ def power_uncompress(real, imag):
     mag = mag ** (1.0 / 0.3)
     real_compress = mag * torch.cos(phase)
     imag_compress = mag * torch.sin(phase)
-    return torch.stack([real_compress, imag_compress], -1)
+    # return torch.stack([real_compress, imag_compress], -1)
+    return torch.complex(real_compress, imag_compress)
 
 
 class LearnableSigmoid(nn.Module):

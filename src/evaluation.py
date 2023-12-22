@@ -11,8 +11,69 @@ from .utils import power_compress, power_uncompress, power_compress_with_low_f_d
 
 
 @torch.no_grad()
+def get_low_frequency(audio, n_fft=400, hop=100):
+
+    audio = audio.cuda()
+
+    c = torch.sqrt(audio.size(-1) / torch.sum((audio**2.0), dim=-1))
+    audio = torch.transpose(audio, 0, 1)
+    audio = torch.transpose(audio * c, 0, 1)
+
+    audio_spec = torch.stft(
+        audio, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
+    )
+    _, temp_mag, temp_phase = power_compress_with_low_f_delete(audio_spec)
+
+    return temp_mag, temp_phase
+
+@torch.no_grad()
+def enhance_one_track_with_temp_lowf(
+    model, noisy, n_fft=400, hop=100
+):
+    noisy = noisy.cuda()
+
+    c = torch.sqrt(noisy.size(-1) / torch.sum((noisy**2.0), dim=-1))
+    noisy = torch.transpose(noisy, 0, 1)
+    noisy = torch.transpose(noisy * c, 0, 1)
+
+    noisy_spec = torch.stft(
+        noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
+    )
+
+    noisy_spec, temp_mag, temp_phase = power_compress_with_low_f_delete(noisy_spec, delete_f_bin=8)
+
+    noisy_spec = noisy_spec.permute(0, 1, 3, 2)
+
+    est_real, est_imag, est_real2, est_imag2 = model(noisy_spec)
+    est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
+    est_real2, est_imag2 = est_real2.permute(0, 1, 3, 2), est_imag2.permute(0, 1, 3, 2)
+
+    est_spec_uncompress = power_uncompress_with_low_f_delete(est_real, est_imag, temp_mag, temp_phase).squeeze(1)
+    est_audio = torch.istft(
+        est_spec_uncompress,
+        n_fft,
+        hop,
+        window=torch.hamming_window(n_fft).cuda(),
+        onesided=True,
+    )
+    est_audio = est_audio / c
+    est_audio = torch.flatten(est_audio).cpu().numpy()
+
+    est_spec_uncompress2 = power_uncompress_with_low_f_delete(est_real2, est_imag2, temp_mag, temp_phase).squeeze(1)
+    est_audio2 = torch.istft(
+        est_spec_uncompress2,
+        n_fft,
+        hop,
+        window=torch.hamming_window(n_fft).cuda(),
+        onesided=True,
+    )
+    est_audio2 = est_audio2 / c
+    est_audio2 = torch.flatten(est_audio2).cpu().numpy()
+    return est_audio, est_audio2
+
+@torch.no_grad()
 def enhance_one_track(
-    model, noisy, cut_len, n_fft=400, hop=100
+    model, noisy, n_fft=400, hop=100
 ):
     noisy = noisy.cuda()
 
@@ -34,14 +95,14 @@ def enhance_one_track(
     noisy_spec = torch.stft(
         noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
     )
-    noisy_spec, temp_mag, temp_phase = power_compress_with_low_f_delete(noisy_spec)
+    noisy_spec = power_compress(noisy_spec)
     noisy_spec = noisy_spec.permute(0, 1, 3, 2)
 
     est_real, est_imag, est_real2, est_imag2 = model(noisy_spec)
     est_real, est_imag = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2)
     est_real2, est_imag2 = est_real2.permute(0, 1, 3, 2), est_imag2.permute(0, 1, 3, 2)
 
-    est_spec_uncompress = power_uncompress_with_low_f_delete(est_real, est_imag, temp_mag, temp_phase).squeeze(1)
+    est_spec_uncompress = power_uncompress(est_real, est_imag).squeeze(1)
     est_audio = torch.istft(
         est_spec_uncompress,
         n_fft,
@@ -52,7 +113,7 @@ def enhance_one_track(
     est_audio = est_audio / c
     est_audio = torch.flatten(est_audio).cpu().numpy()
 
-    est_spec_uncompress2 = power_uncompress_with_low_f_delete(est_real2, est_imag2, temp_mag, temp_phase).squeeze(1)
+    est_spec_uncompress2 = power_uncompress(est_real2, est_imag2).squeeze(1)
     est_audio2 = torch.istft(
         est_spec_uncompress2,
         n_fft,

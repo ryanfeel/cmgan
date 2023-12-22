@@ -31,6 +31,7 @@ parser.add_argument("--loss_weights", type=list, default=[0.1, 0.9, 0.2, 0.05],
                     help="weights of RI components, magnitude, time loss, and Metric Disc")
 parser.add_argument("--exp_name", type=str, default='default',
                     help="dir of saved model")
+parser.add_argument("--checkpoint", type=str, default="")
 args = parser.parse_args()
 logging.basicConfig(level=logging.INFO)
 
@@ -47,15 +48,22 @@ def ddp_setup(rank, world_size):
 
 
 class Trainer:
-    def __init__(self, train_ds, test_ds, gpu_id: int):
+    def __init__(self, train_ds, test_ds, gpu_id: int, checkpoint):
         self.n_fft = 800
         self.hop = 400
         self.train_ds = train_ds
         self.test_ds = test_ds
         self.epoch = 0
+        self.init_epoch = self.epoch
         self.model = TSCNet(num_channel=64, num_features=self.n_fft // 2 + 1).to(gpu_id)
+        
+        if not checkpoint == "":
+            self.init_epoch = int(checkpoint.split('_')[-2])
+            checkpoint = torch.load(checkpoint)
+            self.model.load_state_dict(checkpoint)
+
         # self.discriminator = discriminator.Discriminator(ndf=16).to(gpu_id)
-        print(gpu_id)
+
         if gpu_id == 0:
             summary(
                 self.model, [(1, 2, args.cut_len // self.hop + 1, int(self.n_fft / 2) + 1)]
@@ -88,7 +96,8 @@ class Trainer:
             self.n_fft,
             self.hop,
             window=torch.hamming_window(self.n_fft).to(self.gpu_id),
-            onesided=True
+            onesided=True,
+            return_complex=True
         )
         clean_spec = torch.stft(
             clean,
@@ -96,6 +105,7 @@ class Trainer:
             self.hop,
             window=torch.hamming_window(self.n_fft).to(self.gpu_id),
             onesided=True,
+            return_complex=True
         )
         clean_spec2 = torch.stft(
             clean2,
@@ -103,6 +113,7 @@ class Trainer:
             self.hop,
             window=torch.hamming_window(self.n_fft).to(self.gpu_id),
             onesided=True,
+            return_complex=True
         )
         # print(noisy_spec.size())
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
@@ -202,21 +213,21 @@ class Trainer:
 
         return loss
 
-    def calculate_scheduling_loss(self, generator_outputs):
+    def calculate_scheduling_loss(self, generator_outputs, mag_weight=1.0):
         if self.epoch < 10:
             loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
         elif self.epoch < 20:
             mag_loss = self.calculate_mag_loss(generator_outputs)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.5)
-            loss = loss + mag_loss
+            loss = loss + mag_loss * mag_weight
         elif self.epoch < 30:
             mag_loss = self.calculate_mag_loss(generator_outputs, 0.8)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.8)
-            loss = loss + mag_loss * 5.0
+            loss = loss + mag_loss * 5.0 * mag_weight
         else:
             mag_loss = self.calculate_mag_loss(generator_outputs, 1.0)
             loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 1.0)
-            loss = loss + mag_loss * 10.0
+            loss = loss + mag_loss * 10.0 * mag_weight
 
         return loss
             
@@ -392,7 +403,7 @@ class Trainer:
         # scheduler_D = torch.optim.lr_scheduler.StepLR(
         #     self.optimizer_disc, step_size=args.decay_epoch, gamma=0.5
         # )
-        for epoch in range(args.epochs):
+        for epoch in range(self.init_epoch, args.epochs):
             self.epoch = int(epoch)
             self.model.train()
             # self.discriminator.train()
@@ -441,7 +452,7 @@ def main(rank: int, world_size: int, args):
     train_ds, test_ds = dataloader.load_data(
         args.data_dir, args.batch_size, 2, args.cut_len
     )
-    trainer = Trainer(train_ds, test_ds, rank)
+    trainer = Trainer(train_ds, test_ds, rank, args.checkpoint)
     trainer.train(writer)
     destroy_process_group()
 
