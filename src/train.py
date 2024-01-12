@@ -21,7 +21,7 @@ parser.add_argument("--batch_size", type=int, default=1)
 parser.add_argument("--log_interval", type=int, default=500)
 parser.add_argument("--decay_epoch", type=int, default=30, help="epoch from which to start lr decay")
 parser.add_argument("--init_lr", type=float, default=5e-4, help="initial learning rate")
-parser.add_argument("--cut_len", type=int, default=16000*15, help="cut length, default is 2 seconds in denoise "
+parser.add_argument("--cut_len", type=int, default=16000*20, help="cut length, default is 2 seconds in denoise "
                                                                  "and dereverberation")
 parser.add_argument("--data_dir", type=str, default='dir to VCTK-DEMAND dataset',
                     help="dir of VCTK+DEMAND dataset")
@@ -49,7 +49,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer:
     def __init__(self, train_ds, test_ds, gpu_id: int, checkpoint):
-        self.n_fft = 800
+        self.n_fft = 400
         self.hop = 400
         self.train_ds = train_ds
         self.test_ds = test_ds
@@ -184,20 +184,32 @@ class Trainer:
             "clean_audio2": clean_audio2
         }
 
-    def calculate_sisnr_loss_without_perm(self, generator_outputs, near_weight=0.5):
+    def calculate_sisnr_loss_without_perm_and_penalty(self, generator_outputs, near_weight=0.5):
         clean_audio = generator_outputs["clean"]
         clean_audio2 = generator_outputs["clean2"]
         est_audio = generator_outputs["est_audio"]
         est_audio2 = generator_outputs["est_audio2"]
+        mixture = generator_outputs["mixture"]
 
         clean_audio = clean_audio.unsqueeze(-1).permute(1, 0, 2)
         clean_audio2 = clean_audio2.unsqueeze(-1).permute(1, 0, 2)
         est_audio = est_audio.unsqueeze(-1).permute(1, 0, 2)
         est_audio2 = est_audio2.unsqueeze(-1).permute(1, 0, 2)
+        mixture = mixture.unsqueeze(-1).permute(1, 0, 2)
+        
+        mix_s1 = cal_si_snr(mixture, clean_audio)
+        mix_s2 = cal_si_snr(mixture, clean_audio2)
+        mix_est1 = cal_si_snr(mixture, est_audio)
+        mix_est2 = cal_si_snr(mixture, est_audio2)
         
         loss1 = cal_si_snr(clean_audio, est_audio)
         loss2 = cal_si_snr(clean_audio2, est_audio2)
-        
+
+        if mix_s1.item() > -10 and mix_est1.item() < -15:
+            loss1.data[0][0][0] = 20.0
+        if mix_s2.item() > -10 and mix_est2.item() < -15:
+            loss2.data[0][0][0] = 20.0
+
         loss = loss1 * near_weight + loss2 * (1 - near_weight)
 
         return loss
@@ -218,15 +230,15 @@ class Trainer:
             loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
         elif self.epoch < 20:
             mag_loss = self.calculate_mag_loss(generator_outputs)
-            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.5)
+            loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs, 0.5)
             loss = loss + mag_loss * mag_weight
         elif self.epoch < 30:
             mag_loss = self.calculate_mag_loss(generator_outputs, 0.8)
-            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 0.8)
+            loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs, 0.8)
             loss = loss + mag_loss * 5.0 * mag_weight
         else:
             mag_loss = self.calculate_mag_loss(generator_outputs, 1.0)
-            loss = self.calculate_sisnr_loss_without_perm(generator_outputs, 1.0)
+            loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs, 1.0)
             loss = loss + mag_loss * 10.0 * mag_weight
 
         return loss
@@ -331,8 +343,9 @@ class Trainer:
         generator_outputs["one_labels"] = one_labels
         generator_outputs["clean"] = clean
         generator_outputs["clean2"] = clean2
+        generator_outputs["mixture"] = noisy
 
-        # loss = self.calculate_generator_loss(generator_outputs)
+        # loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs)
         loss = self.calculate_scheduling_loss(generator_outputs)
         self.optimizer.zero_grad()
         loss.backward()
@@ -460,5 +473,5 @@ def main(rank: int, world_size: int, args):
 if __name__ == "__main__":
 
     world_size = torch.cuda.device_count()
-    world_size = 4
+    world_size = 2
     mp.spawn(main, args=(world_size, args), nprocs=world_size)
