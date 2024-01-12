@@ -1,13 +1,3 @@
-import torch
-from torch import nn, einsum
-import torch.nn.functional as F
-
-from einops import rearrange
-from einops.layers.torch import Rearrange
-
-# source: https://github.com/lucidrains/conformer/blob/master/conformer/conformer.py
-# helper functions
-
 # Copyright (c) 2023, Tri Dao, Albert Gu.
 
 import math
@@ -36,131 +26,6 @@ try:
     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
-
-
-def exists(val):
-    return val is not None
-
-
-def default(val, d):
-    return val if exists(val) else d
-
-
-def calc_same_padding(kernel_size):
-    pad = kernel_size // 2
-    return (pad, pad - (kernel_size + 1) % 2)
-
-
-class Swish(nn.Module):
-    def forward(self, x):
-        return x * x.sigmoid()
-
-
-class GLU(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        out, gate = x.chunk(2, dim=self.dim)
-        return out * gate.sigmoid()
-
-
-class DepthWiseConv1d(nn.Module):
-    def __init__(self, chan_in, chan_out, kernel_size, padding):
-        super().__init__()
-        self.padding = padding
-        self.conv = nn.Conv1d(chan_in, chan_out, kernel_size, groups=chan_in)
-
-    def forward(self, x):
-        x = F.pad(x, self.padding)
-        return self.conv(x)
-
-
-# attention, feedforward, and conv module
-
-
-class Scale(nn.Module):
-    def __init__(self, scale, fn):
-        super().__init__()
-        self.fn = fn
-        self.scale = scale
-
-    def forward(self, x, **kwargs):
-        return self.fn(x, **kwargs) * self.scale
-
-
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.fn = fn
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(self, x, **kwargs):
-        x = self.norm(x)
-        return self.fn(x, **kwargs)
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, max_pos_emb=512):
-        super().__init__()
-        inner_dim = dim_head * heads
-        self.heads = heads
-        self.scale = dim_head**-0.5
-        self.to_q = nn.Linear(dim, inner_dim, bias=False)
-        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
-        self.to_out = nn.Linear(inner_dim, dim)
-
-        self.max_pos_emb = max_pos_emb
-        self.rel_pos_emb = nn.Embedding(2 * max_pos_emb + 1, dim_head)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, context=None, mask=None, context_mask=None):
-        n, device, h, max_pos_emb, has_context = (
-            x.shape[-2],
-            x.device,
-            self.heads,
-            self.max_pos_emb,
-            exists(context),
-        )
-        context = default(context, x)
-
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
-
-        dots = einsum("b h i d, b h j d -> b h i j", q, k) * self.scale
-
-        # shaw's relative positional embedding
-        seq = torch.arange(n, device=device)
-        dist = rearrange(seq, "i -> i ()") - rearrange(seq, "j -> () j")
-        dist = dist.clamp(-max_pos_emb, max_pos_emb) + max_pos_emb
-        rel_pos_emb = self.rel_pos_emb(dist).to(q)
-        pos_attn = einsum("b h n d, n r d -> b h n r", q, rel_pos_emb) * self.scale
-        dots = dots + pos_attn
-
-        if exists(mask) or exists(context_mask):
-            mask = default(mask, lambda: torch.ones(*x.shape[:2], device=device))
-            context_mask = (
-                default(context_mask, mask)
-                if not has_context
-                else default(
-                    context_mask, lambda: torch.ones(*context.shape[:2], device=device)
-                )
-            )
-            mask_value = -torch.finfo(dots.dtype).max
-            mask = rearrange(mask, "b i -> b () i ()") * rearrange(
-                context_mask, "b j -> b () () j"
-            )
-            dots.masked_fill_(~mask, mask_value)
-
-        attn = dots.softmax(dim=-1)
-
-        out = einsum("b h i j, b h j d -> b h i d", attn, v)
-        out = rearrange(out, "b h n d -> b n (h d)")
-        out = self.to_out(out)
-        return self.dropout(out)
-
 
 
 class Mamba(nn.Module):
@@ -429,93 +294,60 @@ class Mamba(nn.Module):
         return conv_state, ssm_state
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, mult=4, dropout=0.0):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(dim, dim * mult),
-            Swish(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * mult, dim),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-class ConformerConvModule(nn.Module):
+class Block(nn.Module):
     def __init__(
-        self, dim, causal=False, expansion_factor=2, kernel_size=31, dropout=0.0
+        self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False
     ):
+        """
+        Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
+
+        This Block has a slightly different structure compared to a regular
+        prenorm Transformer block.
+        The standard block is: LN -> MHA/MLP -> Add.
+        [Ref: https://arxiv.org/abs/2002.04745]
+        Here we have: Add -> LN -> Mixer, returning both
+        the hidden_states (output of the mixer) and the residual.
+        This is purely for performance reasons, as we can fuse add and LayerNorm.
+        The residual needs to be provided (except for the very first block).
+        """
         super().__init__()
+        self.residual_in_fp32 = residual_in_fp32
+        self.fused_add_norm = fused_add_norm
+        self.mixer = mixer_cls(dim)
+        self.norm = norm_cls(dim)
+        if self.fused_add_norm:
+            assert RMSNorm is not None, "RMSNorm import fails"
+            assert isinstance(
+                self.norm, (nn.LayerNorm, RMSNorm)
+            ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
 
-        inner_dim = dim * expansion_factor
-        padding = calc_same_padding(kernel_size) if not causal else (kernel_size - 1, 0)
-
-        self.net = nn.Sequential(
-            nn.LayerNorm(dim),
-            Rearrange("b n c -> b c n"),
-            nn.Conv1d(dim, inner_dim * 2, 1),
-            GLU(dim=1),
-            DepthWiseConv1d(
-                inner_dim, inner_dim, kernel_size=kernel_size, padding=padding
-            ),
-            nn.BatchNorm1d(inner_dim) if not causal else nn.Identity(),
-            Swish(),
-            nn.Conv1d(inner_dim, dim, 1),
-            Rearrange("b c n -> b n c"),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-# Conformer Block
-
-
-class ConformerBlock(nn.Module):
-    def __init__(
-        self,
-        *,
-        dim,
-        dim_head=64,
-        heads=8,
-        ff_mult=4,
-        conv_expansion_factor=2,
-        conv_kernel_size=31,
-        attn_dropout=0.0,
-        ff_dropout=0.0,
-        conv_dropout=0.0
+    def forward(
+        self, hidden_states: Tensor, residual: Optional[Tensor] = None, inference_params=None
     ):
-        super().__init__()
-        self.ff1 = FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
-        # self.attn = Attention(
-        #     dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout
-        # )
-        self.atten = Mamba(
-            d_model=dim
-        )
-        self.conv = ConformerConvModule(
-            dim=dim,
-            causal=False,
-            expansion_factor=conv_expansion_factor,
-            kernel_size=conv_kernel_size,
-            dropout=conv_dropout,
-        )
-        self.ff2 = FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout)
+        r"""Pass the input through the encoder layer.
 
-        self.attn = PreNorm(dim, self.attn)
-        self.ff1 = Scale(0.5, PreNorm(dim, self.ff1))
-        self.ff2 = Scale(0.5, PreNorm(dim, self.ff2))
+        Args:
+            hidden_states: the sequence to the encoder layer (required).
+            residual: hidden_states = Mixer(LN(residual))
+        """
+        if not self.fused_add_norm:
+            residual = (hidden_states + residual) if residual is not None else hidden_states
+            hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
+            if self.residual_in_fp32:
+                residual = residual.to(torch.float32)
+        else:
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
+            hidden_states, residual = fused_add_norm_fn(
+                hidden_states,
+                self.norm.weight,
+                self.norm.bias,
+                residual=residual,
+                prenorm=True,
+                residual_in_fp32=self.residual_in_fp32,
+                eps=self.norm.eps,
+            )
+        hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+        return hidden_states, residual
 
-        self.post_norm = nn.LayerNorm(dim)
-
-    def forward(self, x, mask=None):
-        x = self.ff1(x) + x
-        x = self.attn(x, mask=mask) + x
-        x = self.conv(x) + x
-        x = self.ff2(x) + x
-        x = self.post_norm(x)
-        return x
+    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
