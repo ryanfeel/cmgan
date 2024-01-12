@@ -16,7 +16,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.tensorboard import SummaryWriter
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--epochs", type=int, default=120, help="number of epochs of training")
+parser.add_argument("--epochs", type=int, default=30, help="number of epochs of training")
 parser.add_argument("--batch_size", type=int, default=1)
 parser.add_argument("--log_interval", type=int, default=500)
 parser.add_argument("--decay_epoch", type=int, default=30, help="epoch from which to start lr decay")
@@ -49,7 +49,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer:
     def __init__(self, train_ds, test_ds, gpu_id: int, checkpoint):
-        self.n_fft = 400
+        self.n_fft = 800
         self.hop = 400
         self.train_ds = train_ds
         self.test_ds = test_ds
@@ -87,9 +87,9 @@ class Trainer:
     def forward_generator_step(self, clean, clean2, noisy):
 
         # Normalization
-        c = torch.sqrt(noisy.size(-1) / torch.sum((noisy**2.0), dim=-1))
-        noisy, clean, clean2 = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(clean2, 0, 1)
-        noisy, clean, clean2 = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(clean2 * c, 0, 1)
+        # c = torch.sqrt(noisy.size(-1) / torch.sum((noisy**2.0), dim=-1))
+        # noisy, clean, clean2 = torch.transpose(noisy, 0, 1), torch.transpose(clean, 0, 1), torch.transpose(clean2, 0, 1)
+        # noisy, clean, clean2 = torch.transpose(noisy * c, 0, 1), torch.transpose(clean * c, 0, 1), torch.transpose(clean2 * c, 0, 1)
 
         noisy_spec = torch.stft(
             noisy,
@@ -226,13 +226,13 @@ class Trainer:
         return loss
 
     def calculate_scheduling_loss(self, generator_outputs, mag_weight=1.0):
-        if self.epoch < 10:
+        if self.epoch < 1:
             loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
-        elif self.epoch < 20:
+        elif self.epoch < 10:
             mag_loss = self.calculate_mag_loss(generator_outputs)
             loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs, 0.5)
             loss = loss + mag_loss * mag_weight
-        elif self.epoch < 30:
+        elif self.epoch < 20:
             mag_loss = self.calculate_mag_loss(generator_outputs, 0.8)
             loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs, 0.8)
             loss = loss + mag_loss * 5.0 * mag_weight
