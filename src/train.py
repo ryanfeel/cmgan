@@ -379,6 +379,7 @@ class Trainer:
         generator_outputs["one_labels"] = one_labels
         generator_outputs["clean"] = clean
         generator_outputs["clean2"] = clean2
+        generator_outputs["mixture"] = noisy
 
         # loss = self.calculate_generator_loss(generator_outputs)
         loss = self.calculate_scheduling_loss(generator_outputs)
