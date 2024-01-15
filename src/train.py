@@ -17,11 +17,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--epochs", type=int, default=30, help="number of epochs of training")
-parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--batch_size", type=int, default=2)
 parser.add_argument("--log_interval", type=int, default=500)
 parser.add_argument("--decay_epoch", type=int, default=30, help="epoch from which to start lr decay")
 parser.add_argument("--init_lr", type=float, default=5e-4, help="initial learning rate")
-parser.add_argument("--cut_len", type=int, default=16000*20, help="cut length, default is 2 seconds in denoise "
+parser.add_argument("--cut_len", type=int, default=16000*30, help="cut length, default is 2 seconds in denoise "
                                                                  "and dereverberation")
 parser.add_argument("--data_dir", type=str, default='dir to VCTK-DEMAND dataset',
                     help="dir of VCTK+DEMAND dataset")
@@ -49,7 +49,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer:
     def __init__(self, train_ds, test_ds, gpu_id: int, checkpoint):
-        self.n_fft = 800
+        self.n_fft = 400
         self.hop = 400
         self.train_ds = train_ds
         self.test_ds = test_ds
@@ -115,7 +115,6 @@ class Trainer:
             onesided=True,
             return_complex=True
         )
-        # print(noisy_spec.size())
         noisy_spec = power_compress(noisy_spec).permute(0, 1, 3, 2)
         clean_spec = power_compress(clean_spec)
         clean_spec2 = power_compress(clean_spec2)
@@ -125,7 +124,9 @@ class Trainer:
         clean_imag2 = clean_spec2[:, 1, :, :].unsqueeze(1)
 
         est_real, est_imag, est_real2, est_imag2 = self.model(noisy_spec)
-        est_real, est_imag, est_real2, est_imag2 = est_real.permute(0, 1, 3, 2), est_imag.permute(0, 1, 3, 2), est_real2.permute(0, 1, 3, 2), est_imag2.permute(0, 1, 3, 2)
+        est_real, est_imag, est_real2, est_imag2 = \
+            est_real.mean(dim=1, keepdim=True).permute(0, 1, 3, 2), est_imag.mean(dim=1, keepdim=True).permute(0, 1, 3, 2),\
+            est_real2.mean(dim=1, keepdim=True).permute(0, 1, 3, 2), est_imag2.mean(dim=1, keepdim=True).permute(0, 1, 3, 2)
         est_mag = torch.sqrt(est_real**2 + est_imag**2)
         est_mag2 = torch.sqrt(est_real2**2 + est_imag2**2)
         clean_mag = torch.sqrt(clean_real**2 + clean_imag**2)
@@ -223,7 +224,7 @@ class Trainer:
         est = torch.stack([est_audio, est_audio2], -1)
         loss = get_si_snr_with_pitwrapper(source, est)
 
-        return loss
+        return loss.mean()
 
     def calculate_scheduling_loss(self, generator_outputs, mag_weight=1.0):
         if self.epoch < 1:
@@ -346,7 +347,8 @@ class Trainer:
         generator_outputs["mixture"] = noisy
 
         # loss = self.calculate_sisnr_loss_without_perm_and_penalty(generator_outputs)
-        loss = self.calculate_scheduling_loss(generator_outputs)
+        loss = self.calculate_sisnr_loss_with_perm(generator_outputs)
+        # print(loss)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
@@ -474,5 +476,5 @@ def main(rank: int, world_size: int, args):
 if __name__ == "__main__":
 
     world_size = torch.cuda.device_count()
-    world_size = 2
+    world_size = 8
     mp.spawn(main, args=(world_size, args), nprocs=world_size)
