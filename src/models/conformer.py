@@ -494,7 +494,7 @@ class ConformerBlock(nn.Module):
         # self.attn = Attention(
         #     dim=dim, dim_head=dim_head, heads=heads, dropout=attn_dropout
         # )
-        self.atten = Mamba(
+        self.attn = Mamba(
             d_model=dim
         )
         self.conv = ConformerConvModule(
@@ -512,9 +512,9 @@ class ConformerBlock(nn.Module):
 
         self.post_norm = nn.LayerNorm(dim)
 
-    def forward(self, x, mask=None):
+    def forward(self, x):
         x = self.ff1(x) + x
-        x = self.attn(x, mask=mask) + x
+        x = self.attn(x) + x
         x = self.conv(x) + x
         x = self.ff2(x) + x
         x = self.post_norm(x)
