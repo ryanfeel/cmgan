@@ -28,7 +28,7 @@ def get_low_frequency(audio, n_fft=400, hop=100):
 
 @torch.no_grad()
 def enhance_one_track_with_temp_lowf(
-    model, noisy, n_fft=400, hop=100
+    model, noisy, n_fft=400, hop=100, delete_f_bin=10
 ):
     noisy = noisy.cuda()
 
@@ -40,7 +40,7 @@ def enhance_one_track_with_temp_lowf(
         noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
     )
 
-    noisy_spec, temp_mag, temp_phase = power_compress_with_low_f_delete(noisy_spec, delete_f_bin=8)
+    noisy_spec, temp_mag, temp_phase = power_compress_with_low_f_delete(noisy_spec, delete_f_bin)
 
     noisy_spec = noisy_spec.permute(0, 1, 3, 2)
 
