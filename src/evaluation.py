@@ -37,7 +37,7 @@ def enhance_one_track_with_temp_lowf(
     noisy = torch.transpose(noisy * c, 0, 1)
 
     noisy_spec = torch.stft(
-        noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
+        noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True, return_complex=True
     )
 
     noisy_spec, temp_mag, temp_phase = power_compress_with_low_f_delete(noisy_spec, delete_f_bin)
@@ -93,7 +93,7 @@ def enhance_one_track(
     #     noisy = torch.reshape(noisy, (batch_size, -1))
 
     noisy_spec = torch.stft(
-        noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True
+        noisy, n_fft, hop, window=torch.hamming_window(n_fft).cuda(), onesided=True, return_complex=True
     )
     noisy_spec = power_compress(noisy_spec)
     noisy_spec = noisy_spec.permute(0, 1, 3, 2)
